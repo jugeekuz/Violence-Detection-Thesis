@@ -14,7 +14,7 @@ class Preprocess:
         self.frameDirectory = frameDirectory
         self.isVideo = isVideo
 
-    def plot_album(self, figsz, image_paths, nrows, ncols, titles, resz = (-1,-1)):
+    def plot_album(figsz, image_paths, nrows, ncols, titles, title = None, resz = (-1,-1)):
         fig, axes = plt.subplots(nrows, ncols,figsize = figsz)
         # this assumes the images are in images_dir/album_name/<name>.jpg
         for imp, ax , title in zip(image_paths, axes.ravel(),titles):
@@ -26,7 +26,9 @@ class Preprocess:
             ax.imshow(img)
             ax.set_title(title)
             ax.axis('off')
-            fig.tight_layout()        
+            fig.tight_layout()
+            if title != None:
+                fig.suptitle(title, fontsize=16)
         return
 
 
@@ -70,46 +72,54 @@ class Preprocess:
         
         return
 
-    #def view_consecutive_frames(self, target_dir, target_class, ):
     
     #Break Video to Frames and 
     def save_frames(self, vid, path, newfps):
         video = cv2.VideoCapture(vid)
 
+        #calculate at how many intervals you save a picture
+        #this could have been more efficient if it was calculated once for RWF dataset
+        #but not all datasets have same size videos
         ((_,_),fps,total_frames) = self.get_video_specs(vid, False)
-        step = (int) (fps/newfps)
-        success, image = video.read()
-        count = 0
-        notskip = 0
+        if fps == 0:
+            return
+        duration = total_frames/fps
+        new_frames = newfps * duration
+        step = (int) (total_frames/(new_frames + 1))
+        
+        #Unfortunately we can't skip frames and that's not only OpenCV's problem
+        #Video codes encode based on the previous frame
+        i = 0
+        success = True
+        name, _ = os.path.splitext(os.path.basename(vid))
         while success:
-            name, _ = os.path.splitext(os.path.basename(vid))
-            name += "%d.jpg" % count
-            fullpath = os.path.join(path,name)
-
-            notskip += 1
-            if notskip == step:
-                cv2.imwrite(fullpath, image)
-                notskip = 0
+            i += 1
             success, image = video.read()
-            #print('Read a new frame: ',success)
+            if i % step == 0:
+                count = i // step 
+                filename = name + ("%d.jpg" % count)
+                fullpath = os.path.join(path,filename)
+                cv2.imwrite(fullpath, image)
 
-            count += 1
+            
         return 
 
 
-    def dataframe(self, folder, fps):
-        newname = ' Dataframe'
-        path = folder + newname
+    def dataframe(self, fps, name = 'Dataframe'):
+        path = self.directory + ' ' + name
         self.frameDirectory = path
         try:
             os.mkdir(path)
-            for root, dirs, files in os.walk(folder, topdown=True):
-                new_root = root.replace(folder,path)
+            for root, dirs, files in os.walk(self.directory, topdown=True):
+                #Replace original folder's name in path with new folder's name
+                new_root = root.replace(self.directory,path)
+                #Create new directory with same name (as you traverse the file tree topdown)
                 for name in dirs:
                     newpath = os.path.join(new_root,name) 
                     os.mkdir(newpath)
+                #If we reached the leaves (files) save the specified frames for each file
                 if not dirs:
-                    newpath = root.replace(folder,path) 
+                    newpath = root.replace(self.directory,path) 
                     for file in os.listdir(root):
                         oldpath = os.path.join(root,file)
                         self.save_frames(oldpath,newpath,fps)
@@ -118,7 +128,22 @@ class Preprocess:
             print("File %s already exists" % path)
         return
 
+from PIL import Image
+from skimage import transform
+
 class Visualize:
+    def load(filename):
+        np_image = Image.open(filename)
+        np_image = np.array(np_image).astype('float32')/255
+        np_image = transform.resize(np_image, (224, 224, 3))
+        np_image = np.expand_dims(np_image, axis=0)
+        return np_image
+
+    def predictions(model, imagedirs, classes):
+        images = map(Visualize.load,imagedirs)
+        predictions = np.array(list(map(model.predict, images)))
+        classifications = list(map(classes[np.argmax], predictions))
+        return classifications
 
     #Gets input model's history and plots accuracy/loss curves per epoch
     def plot_loss_curves(histories):
