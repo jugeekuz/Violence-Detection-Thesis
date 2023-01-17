@@ -8,7 +8,10 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import datetime
 import tensorflow as tf
-
+from keras.utils import Sequence
+import shutil
+from tqdm import tqdm
+import pathlib
 class Preprocess:
     def __init__(self, directory, frameDirectory ="", isVideo=True):
         self.directory = directory
@@ -54,6 +57,8 @@ class Preprocess:
             print(f"The video has size of ({width},{height}) , duration of: {frame_count/fps} sec FPS: {fps} and total frames: {frame_count}.")
         
         return ((width,height),fps,frame_count)
+    
+
 
     #Returns smallest & biggest video dimensions
     def image_ranges(self):
@@ -101,6 +106,7 @@ class Preprocess:
         return target_folder + "/" + random_vid[0]
 
     #Display Random Video fom selected class embedded in Notebook
+    #This doesnt work
     def view_random_video(self, target_dir, target_class):
         random_path = self.get_random_asset(target_dir,target_class)
         extension = random_path[-3:]
@@ -111,60 +117,99 @@ class Preprocess:
         
         return
 
-    
+    def _resize(self,image,target):
+        return cv2.resize(image,target)
+
     #Break Video to Frames and 
-    def save_frames(self, vid, path, newfps):
+    def _save_frames(self, vid, path, newfps, video_i,seq_length=0,toSequence=False, return_frames = False, target_size=(-1,-1)):
         video = cv2.VideoCapture(vid)
+        video_dir = os.path.join(path,("Video_%d" % video_i))
+        os.mkdir(video_dir)
 
         #calculate at how many intervals you save a picture
         #this could have been more efficient if it was calculated once for RWF dataset
         #but not all datasets have same size videos
+        new_frames = 0
+        
         ((_,_),fps,total_frames) = self.get_video_specs(vid, False)
+        
         if fps == 0:
             return
         duration = total_frames/fps
         new_frames = newfps * duration
-        step = (int) (total_frames/(new_frames + 1))
+        step = (int) (total_frames/(new_frames)) #5
         
         #Unfortunately we can't skip frames and that's not only OpenCV's problem
         #Video codes encode based on the previous frame
-        i = 0
+        i, sequence = 0, 0
         success = True
-        name, _ = os.path.splitext(os.path.basename(vid))
+        #name, _ = os.path.splitext(os.path.basename(vid))
         while success:
             i += 1
             success, image = video.read()
-            if i % step == 0:
-                count = i // step 
-                filename = name + ("%d.jpg" % count)
-                fullpath = os.path.join(path,filename)
-                cv2.imwrite(fullpath, image)
-
             
-        return 
+            if i % step == 0 or i == 1:
+                count = i // step  #0
+                if count == new_frames:
+                    video.release()
+                    break             
+                filename = ("frame_%d.jpg" % (count + 1))
+                if toSequence:                    
+                    if (count) % seq_length == 0 or i == 1:#10
+                        seq_dir = ("Sequence %d" % (count // seq_length + 1))
+                        seq_dir = os.path.join(video_dir,seq_dir)
+                        os.mkdir(seq_dir)
+                    fullpath = os.path.join(seq_dir,filename)
+
+                else:
+                    fullpath = os.path.join(video_dir,filename)
+                if target_size != (-1,-1):
+                    image = self._resize(image,target_size)
+                cv2.imwrite(fullpath, image)
+        
+        if return_frames:
+            return new_frames
+        else:               
+            return 
 
 
-    def dataframe(self, fps, name = 'Dataframe'):
-        path = self.directory + ' ' + name
-        self.frameDirectory = path
-        try:
-            os.mkdir(path)
-            for root, dirs, files in os.walk(self.directory, topdown=True):
-                #Replace original folder's name in path with new folder's name
-                new_root = root.replace(self.directory,path)
-                #Create new directory with same name (as you traverse the file tree topdown)
-                for name in dirs:
-                    newpath = os.path.join(new_root,name) 
-                    os.mkdir(newpath)
-                #If we reached the leaves (files) save the specified frames for each file
-                if not dirs:
-                    newpath = root.replace(self.directory,path) 
-                    for file in os.listdir(root):
-                        oldpath = os.path.join(root,file)
-                        self.save_frames(oldpath,newpath,fps)
-                                    
-        except:
-            print("File %s already exists" % path)
+    def dataframe(self, fps, name='Dataframe', toSequence=False, seq_length=0, toDelete=False,target_size=(-1,-1)):
+        if self.frameDirectory != "" and name == 'Dataframe':
+            path = self.frameDirectory
+        else:
+            path = self.directory + ' ' + name
+            self.frameDirectory = path
+        if toDelete and os.path.exists(path):
+            shutil.rmtree(path)
+        #Create new frame root
+        os.mkdir(path)
+        total_videos, total_frames = 0, 0
+        print("Creating directories")
+        for i in tqdm([1]):
+            dumb = 0
+                    
+        for root, dirs, files in os.walk(self.directory, topdown=True):
+            #Replace original folder's name in path with new folder's name
+            new_root = root.replace(self.directory,path)
+            #Create new directory with same name (as you traverse the file tree topdown)
+            for name in dirs:
+                framepath = os.path.join(new_root,name) 
+                os.mkdir(framepath)
+            #If we reached the leaves (files) save the specified frames for each file
+            if not dirs:
+                framepath = root.replace(self.directory,path) 
+                total_videos += len(os.listdir(root))
+                temp_path = pathlib.PurePath(framepath) 
+                if temp_path.parent.name == "train":
+                    trainorval = "Training"
+                else:
+                    trainorval = "Validation"
+                fightno = temp_path.name
+                print("Processing %s videos " % trainorval + "class: %s" % fightno)
+                for video_i, file in enumerate(tqdm(os.listdir(root))):
+                    vidpath = os.path.join(root,file)                    
+                    total_frames += self._save_frames(vid=vidpath,path=framepath,newfps=fps,video_i=video_i,toSequence=toSequence,seq_length=seq_length,return_frames=True,target_size=target_size)
+
         return
 
 
@@ -294,3 +339,4 @@ class Callbacks:
                                                          save_freq=freq, # save every epoch
                                                          verbose=1)
         return checkpoint
+
