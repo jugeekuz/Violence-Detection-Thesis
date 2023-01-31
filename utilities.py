@@ -12,6 +12,8 @@ from keras.utils import Sequence
 import shutil
 from tqdm import tqdm
 import pathlib
+import pandas as pd
+import threading
 class Preprocess:
     def __init__(self, directory, frameDirectory ="", isVideo=True):
         self.directory = directory
@@ -121,14 +123,12 @@ class Preprocess:
         return cv2.resize(image,target)
 
     #Break Video to Frames and 
-    def _save_frames(self, vid, path, newfps, video_i,seq_length=0,toSequence=False, return_frames = False, target_size=(-1,-1)):
+    def _save_sequence(self, vid, path, newfps, video_i,seq_length=1,return_frames = False, target_size=(-1,-1)):
         video = cv2.VideoCapture(vid)
-        video_dir = os.path.join(path,("Video_%d" % video_i))
-        os.mkdir(video_dir)
+        #video_dir = os.path.join(path,("Video_%d" % video_i))
+        #os.mkdir(video_dir)
 
         #calculate at how many intervals you save a picture
-        #this could have been more efficient if it was calculated once for RWF dataset
-        #but not all datasets have same size videos
         new_frames = 0
         
         ((_,_),fps,total_frames) = self.get_video_specs(vid, False)
@@ -139,78 +139,243 @@ class Preprocess:
         new_frames = newfps * duration
         step = (int) (total_frames/(new_frames)) #5
         
+
         #Unfortunately we can't skip frames and that's not only OpenCV's problem
         #Video codes encode based on the previous frame
-        i, sequence = 0, 0
+        i, skip, sequence = 0, 0, 0
         success = True
         #name, _ = os.path.splitext(os.path.basename(vid))
         while success:
             i += 1
+            skip += 1
             success, image = video.read()
-            
-            if i % step == 0 or i == 1:
-                count = i // step  #0
-                if count == new_frames:
-                    video.release()
-                    break             
-                filename = ("frame_%d.jpg" % (count + 1))
-                if toSequence:                    
-                    if (count) % seq_length == 0 or i == 1:#10
-                        seq_dir = ("Sequence %d" % (count // seq_length + 1))
-                        seq_dir = os.path.join(video_dir,seq_dir)
-                        os.mkdir(seq_dir)
-                    fullpath = os.path.join(seq_dir,filename)
+            if skip <= skip_frames:
+                continue
 
+
+            #save a frame every $step frames
+            if i % step == 1:                
+                #$count is the number of frame we saved (starts from 1)
+                count = i // step + 1                
+                if count < 10 :
+                    filename = "frame_0{}.jpg".format(count)
                 else:
-                    fullpath = os.path.join(video_dir,filename)
+                    filename = "frame_{}.jpg".format(count)
+
+                if (count) % seq_length == 1:
+                    #The video index is all the videos before times the sequences per video
+                    # Plus the sequence we're on on this video (starting from 1)
+                    #video_i starts from 0
+                    video_index = (video_i)*(new_frames//seq_length) + (count//seq_length + 1)
+                    video_dir = os.path.join(path,("Video_%d" % video_index))
+                    os.mkdir(video_dir)
+                fullpath = os.path.join(video_dir,filename)
+
+                
                 if target_size != (-1,-1):
                     image = self._resize(image,target_size)
+
                 cv2.imwrite(fullpath, image)
+
+                #if we saved the frames we want dont process the other total_frames/step -1
+                if count == new_frames:
+                    video.release()
+                    break        
         
         if return_frames:
             return new_frames
         else:               
             return 
+    def _save_frames(self, vid, path, newfps,skip_sec=0, return_frames = False, target_size=(-1,-1)):
+        video = cv2.VideoCapture(vid)
+        #calculate at how many intervals you save a picture
+        new_frames = 0        
+        ((_,_),fps,total_frames) = self.get_video_specs(vid, False)        
+        if fps == 0:
+            return
+        duration = total_frames/fps
+
+        skip_frames = skip_sec*fps
+        duration -= skip_sec
+        total_frames -=skip_frames
+
+        new_frames = newfps * duration                
+        step = (int) (total_frames/(new_frames))      
+        #Video codes encode based on the previous frame
+        i, skip, sequence = 0, 0, 0
+        success = True
+        while success:
+            success, image = video.read()    
+
+            #skip the first n frames if asked
+            skip += 1
+            if skip > skip_frames:     
+                i += 1
+                #save a frame every $step frames            
+                if i % step == 1:                
+                    #$count is which frame we saved (starts from 1)
+                    count = i // step + 1                
+                    if count < 10 :
+                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_00{}.jpg".format(count)
+                    elif count< 100:
+                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_0{}.jpg".format(count)
+                    else:
+                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_{}.jpg".format(count)
+
+                    
+                    fullpath = os.path.join(path,filename)                
+                    if target_size != (-1,-1):
+                        image = self._resize(image,target_size)
+                    cv2.imwrite(fullpath, image)
+
+                    #if we saved the frames we want dont process the other total_frames/step -1
+                    if count == new_frames:
+                        video.release()
+                        break        
+        
+        if return_frames:
+            return new_frames
+        else:               
+            return 
+    def _createCSV(self,file_path,csv_path):
+        labels = os.listdir(file_path)
+        video_i = 0
+        num_classes = 2
+        labels_name = {'Fight':0, 'NonFight':1}
+        train_data_path = os.path.join(file_path,os.listdir(file_path)[0])
+        test_data_path = os.path.join(file_path,os.listdir(file_path)[1])
+
+        if not os.path.exists(csv_path):
+            os.mkdir(csv_path)
+        if not os.path.exists(os.path.join(csv_path,'train')):
+            os.mkdir(os.path.join(csv_path,'train'))
+        if not os.path.exists(os.path.join(csv_path,'val')):
+            os.mkdir(os.path.join(csv_path,'val'))
+        
+        total_files = 0
+        for root, dirs, files in os.walk(file_path):
+            if not dirs:
+                total_files += len(files) 
+
+        with tqdm(total=total_files,desc="Creating CSV") as pbar:
+            for (folder_path, path_name) in [(train_data_path,'train'),(test_data_path,'val')]:
+
+                data_dir_list = folder_path
+                for data_dir in os.listdir(data_dir_list):
+                    label = labels_name[str(data_dir)]
+
+                    video_list_dir = os.path.join(folder_path,data_dir)
+                    for vid in os.listdir(video_list_dir):
+                        train_df = pd.DataFrame(columns=['FileName', 'Label', 'ClassName'])
+                        list = []
+                        img_list_dir = os.path.join(video_list_dir,vid)
+                        for img in os.listdir(img_list_dir):
+                            img_path = os.path.join(img_list_dir,img)
+                            list.append({'FileName': img_path,'Label': label,'ClassName':data_dir})
+                            pbar.update(1)
+
+        
+                        train_df = pd.DataFrame.from_records(list)
+                        file_name = '{}_{}.csv'.format(data_dir, vid)
+
+                        train_df.to_csv(csv_path+'/'+'{}/{}'.format(path_name,file_name))
+                        
+
+        return
+
+    def dataframe(self, fps, name='Dataframe', seq_length=0,num_threads=1,createCSV=False,toSequence = False,skip_sec=0, toDelete=False,target_size=(-1,-1)):
 
 
-    def dataframe(self, fps, name='Dataframe', toSequence=False, seq_length=0, toDelete=False,target_size=(-1,-1)):
         if self.frameDirectory != "" and name == 'Dataframe':
             path = self.frameDirectory
         else:
             path = self.directory + ' ' + name
             self.frameDirectory = path
-        if toDelete and os.path.exists(path):
-            shutil.rmtree(path)
-        #Create new frame root
-        os.mkdir(path)
-        total_videos, total_frames = 0, 0
-        print("Creating directories")
-        for i in tqdm([1]):
-            dumb = 0
-                    
-        for root, dirs, files in os.walk(self.directory, topdown=True):
-            #Replace original folder's name in path with new folder's name
-            new_root = root.replace(self.directory,path)
-            #Create new directory with same name (as you traverse the file tree topdown)
-            for name in dirs:
-                framepath = os.path.join(new_root,name) 
-                os.mkdir(framepath)
-            #If we reached the leaves (files) save the specified frames for each file
-            if not dirs:
-                framepath = root.replace(self.directory,path) 
-                total_videos += len(os.listdir(root))
-                temp_path = pathlib.PurePath(framepath) 
-                if temp_path.parent.name == "train":
-                    trainorval = "Training"
-                else:
-                    trainorval = "Validation"
-                fightno = temp_path.name
-                print("Processing %s videos " % trainorval + "class: %s" % fightno)
-                for video_i, file in enumerate(tqdm(os.listdir(root))):
-                    vidpath = os.path.join(root,file)                    
-                    total_frames += self._save_frames(vid=vidpath,path=framepath,newfps=fps,video_i=video_i,toSequence=toSequence,seq_length=seq_length,return_frames=True,target_size=target_size)
 
+        if toDelete and os.path.exists(path):
+            with tqdm(total=1,desc='Deleting Files') as pbar:
+                shutil.rmtree(path)
+                pbar.update(1)
+
+        #Create new frame root
+        totald = 3 if createCSV else 1
+        with tqdm(total=totald,desc='Creating Directories') as pbar:
+            if not os.path.exists(path):
+                os.mkdir(path)
+            pbar.update(1)
+            if not toSequence and createCSV:
+                file_path = os.path.join(path,'activity_data')
+                if not os.path.exists(file_path):
+                    os.mkdir(file_path)
+                pbar.update(1)
+                csv_path = os.path.join(path,'data_files')
+                if not os.path.exists(csv_path):
+                    os.mkdir(csv_path)
+                pbar.update(1)
+                path = file_path
+
+        total_videos, total_frames = 0, 0
+        total_files = 0
+        for root, dirs, files in os.walk(self.directory):
+            if not dirs:
+                total_files += len(files) 
+        print("Discovered {} Videos".format(total_files))
+        try:
+            
+            with tqdm(total=total_files,desc='Processing videos') as pbar:
+                for root, dirs, files in os.walk(self.directory, topdown=True):
+                    #Replace original folder's name in path with new folder's name
+                    new_root = root.replace(self.directory,path)
+                    #Create new directory with same name (as you traverse the file tree topdown)
+                    for name in dirs:
+                        framepath = os.path.join(new_root,name) 
+                        if not os.path.exists(framepath):
+                            os.mkdir(framepath)
+                    #If we reached the leaves (files) save the specified frames for each file
+                    if not dirs:
+                        framepath = root.replace(self.directory,path) 
+                        total_videos += len(os.listdir(root))
+                        #process = multiprocessing.Process(target=self._save_frames,)
+                        #num_threads = len(os.listdir(root))
+                        thread_list = []
+                        for video_i, file in enumerate(os.listdir(root)):
+                            vidpath = os.path.join(root,file)         
+                            #na sigourepsw oti to video i ksekinaei apo 1  
+                            if num_threads != 1:
+
+                                if not toSequence:
+                                    thread = threading.Thread(target=self._save_frames,args=(vidpath,framepath,fps,skip_sec,False,target_size,))
+                                else:
+                                    thread = threading.Thread(target=self._save_sequence,args=(vidpath,framepath,fps,video_i,seq_length,False,target_size,))
+                                    
+                                thread_list.append(thread)
+                                thread_list[video_i%num_threads].start()
+                                
+                                
+                                if len(thread_list)==num_threads:
+                                    for thread in thread_list:
+                                        thread.join()
+                                        pbar.update(1)
+                                    thread_list=[]
+                            else:
+                                if toSequence:
+                                    self._save_sequence(vidpath,framepath,fps,video_i,seq_length,False,target_size)
+                                else:
+                                    self._save_frames(vidpath,framepath,fps,skip_sec,False,target_size)
+                                pbar.update(1)
+        
+        except Exception as e:
+            print('File already exists')
+        finally:
+            if createCSV:
+                self._createCSV(path,csv_path)    
         return
+    
+                
+
+
+
+            
 
 
 class Visualize:
