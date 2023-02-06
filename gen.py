@@ -4,61 +4,30 @@ import pandas as pd
 import cv2
 from collections import deque
 import copy
-from keras.utils import Sequence
+from tensorflow.keras.utils import Sequence
 from keras.utils import np_utils
-
-
-'''
-def data_generator(data,batch_size=10,shuffle=True):              
-    """
-    Yields the next training batch.
-    data is an array  [[[frame1_filename,frame2_filename,…frame16_filename],label1], [[frame1_filename,frame2_filename,…frame16_filename],label2],……….].
-    """
-    num_samples = len(data)
-    #if shuffle:
-        #data = shuffle_data(data)
-    while True:   
-        for offset in range(0, num_samples, batch_size):
-            #print ('startring index: ', offset) 
-            # Get the samples you'll use in this batch
-            batch_samples = data[offset:offset+batch_size]
-            # Initialise X_train and y_train arrays for this batch
-            X_train = []
-            y_train = []
-            # For each example
-            for batch_sample in batch_samples:
-                # Load image (X)
-                x = batch_sample[0]
-                # Read label (y)
-                y = batch_sample[1]
-                temp_data_list = []
-                for img in x:
-                    try:
-                        img = cv2.imread(img)
-                        #apply any kind of preprocessing here
-                        #img = cv2.resize(img,(224,224))
-                        temp_data_list.append(img)
-                    except Exception as e:
-                        print (e)
-                        print ('error reading file: ',img)                      
-                # Add example to arrays
-                X_train.append(temp_data_list)
-                y_train.append(y)
-    
-            # Make sure they're numpy arrays (as opposed to lists)
-            X_train = np.array(X_train)
-            #X_train = np.rollaxis(X_train,1,4)
-            y_train = np.array(y_train)
-            # create one hot encoding for training in keras
-            y_train = np_utils.to_categorical(y_train, 3)
-    
-            # yield the next training batch            
-            yield X_train, y_train
-'''
+import random
+# horizontal flip
+# random brightness
+# rotation range
 
 
 class FrameGenerator(Sequence):
-    def __init__(self,path,label='train',batch_size=1,temporal_stride=1,temporal_length=5,target_size=(224,224),n_classes=2,rescale = 1/255.,is_autoencoder=False,shuffle=True):
+    def __init__(self,
+                path,
+                label='train',
+                batch_size=1,
+                temporal_stride=1,
+                temporal_length=5,
+                target_size=(224,224),
+                n_classes=2,
+                rescale = 1/255.,
+                append_flows=False,
+                is_autoencoder=False,
+                shuffle=True,
+                vertical_flip=False,
+                rotation_range=[0.0,0.0],
+                brightness_range=[0.0,0.0]):
         #Initializing the values
         self.target_size = target_size
         self.path = path
@@ -67,9 +36,16 @@ class FrameGenerator(Sequence):
         self.data = pd.DataFrame(self._load_samples(path=self.path,data_cat=label))
         self.batch_size = batch_size
         self.rescale = rescale
+
+        self.vertical_flip = vertical_flip
+        self.rotation_range = rotation_range
+        self.brightness_range = brightness_range
+        self.__data_augmentation = self.vertical_flip or not self.rotation_range==[0.0,0.0] or not self.brightness_range==[0.0,0.0]
+
         self.list_IDs = np.arange(len(self.data))
         self.n_classes = n_classes
         self.is_autoencoder = is_autoencoder
+        self.append_flows=append_flows
         self.shuffle = shuffle
         self.on_epoch_end()
 
@@ -89,12 +65,79 @@ class FrameGenerator(Sequence):
         #Generate batch
         X,y = self.__data_generation(list_IDs_temp)
         return X,y
-
+    
+    # Data augmentation
+    # Per Image
     def __transform(self,image):
         ext_img = cv2.resize(image,self.target_size)
         ext_img = ext_img * self.rescale
         return ext_img
 
+    # Per Sequence 
+    def __horizontal_flip(self,frame_seq:np.ndarray)->np.ndarray:
+        flip = random.sample([True,False],1)
+        if not flip:
+            return frame_seq
+
+        for i in range(len(frame_seq)):
+            frame_seq[i] = cv2.flip(frame_seq[i],1)
+
+        return frame_seq
+
+    def __rotation(self,frame_seq:np.ndarray)->np.ndarray:
+        
+        return frame_seq
+    
+    def __random_brightness(self,frame_seq:np.ndarray)->np.ndarray:
+        return frame_seq
+
+
+    def __augment(self,frame_seq):
+        if not self.__data_augmentation:
+            return frame_seq
+        
+        mapping = lambda a, b, c, x: a(b(c(x)))
+        return map(mapping,[self.__horizontal_flip,self.__rotation,self.__random_brightness])
+
+
+    def __getOpticalFlow(self,frame_seq):
+        """Calculate dense optical flow of input video
+        Args:
+            video: the input video with shape of [frames,height,width,channel]. dtype=np.array
+        Returns:
+            flows_x: the optical flow at x-axis, with the shape of [frames,height,width,channel]
+            flows_y: the optical flow at y-axis, with the shape of [frames,height,width,channel]
+        """
+        # initialize the list of optical flows
+        gray_video = []
+        for i in range(len(frame_seq)):
+            img = cv2.cvtColor(frame_seq[i], cv2.COLOR_RGB2GRAY)
+            gray_video.append(np.reshape(img,(self.target_size[0],self.target_size[1],1)))
+
+        flows = []
+        for i in range(0,len(frame_seq)-1):
+            # calculate optical flow between each pair of frames
+            flow = cv2.calcOpticalFlowFarneback(gray_video[i], gray_video[i+1], None, 0.5, 3, 15, 3, 5, 1.2, cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
+            # subtract the mean in order to eliminate the movement of camera
+            flow[..., 0] -= np.mean(flow[..., 0])
+            flow[..., 1] -= np.mean(flow[..., 1])
+            # normalize each component in optical flow
+            flow[..., 0] = cv2.normalize(flow[..., 0],None,0,255,cv2.NORM_MINMAX)
+            flow[..., 1] = cv2.normalize(flow[..., 1],None,0,255,cv2.NORM_MINMAX)
+            # Add into list 
+            flows.append(flow)
+            
+        # Padding the last frame as empty array
+        flows.append(np.zeros((self.target_size[0],self.target_size[1],2)))
+        flows = np.array(flows)
+        frames_flows = []
+        for frame, flow in zip(frame_seq, flows):
+            frames_flows.append(np.append(frame,flow,axis=2))
+
+        frames_flows = np.array(frames_flows, dtype=np.float32)
+        return frames_flows
+
+        
     def __data_generation(self,list_IDs_temp):
         X_data = []
         y_data = []
@@ -109,9 +152,15 @@ class FrameGenerator(Sequence):
                 except Exception as e: 
                     '''Code you'd want to run in case of an exception/err'''
                 temp_data_list.append(ext_img)
+            if self.append_flows:
+                temp_data_list = np.array(temp_data_list,dtype=np.float32)
+                temp_data_list = self.__augment(temp_data_list)
+                temp_data_list = self.__getOpticalFlow(temp_data_list)
             X_data.append(temp_data_list) 
             y_data.append(y)
         X = np.array(X_data)  #Converting list to array
+        
+
         y = np.array(y_data)
         if self.is_autoencoder == True:
             return X, X
@@ -147,6 +196,11 @@ class FrameGenerator(Sequence):
                     for t in range(temporal_stride):
                         samples.popleft()
                     yield samples_c,label_list[0]
+
+
+
+
+
 
 
     def _load_samples(self,path='data_files',data_cat='train'):
