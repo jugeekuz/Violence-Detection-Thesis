@@ -7,6 +7,7 @@ import copy
 from tensorflow.keras.utils import Sequence
 from keras.utils import np_utils
 import random
+from tensorflow.keras.preprocessing.image import apply_brightness_shift, apply_affine_transform
 # horizontal flip
 # random brightness
 # rotation range
@@ -21,13 +22,18 @@ class FrameGenerator(Sequence):
                 temporal_length=5,
                 target_size=(224,224),
                 n_classes=2,
+                #Augmentations
                 rescale = 1/255.,
+                data_augmentation = False,
+                jitter_prob = 0,
+                brightness_range = [1.0,1.0],
+                rotation_range = 0,
+                horizontal_flip = False,
+
                 append_flows=False,
                 is_autoencoder=False,
                 shuffle=True,
-                vertical_flip=False,
-                rotation_range=[0.0,0.0],
-                brightness_range=[0.0,0.0]):
+                vertical_flip=False):
         #Initializing the values
         self.target_size = target_size
         self.path = path
@@ -40,7 +46,7 @@ class FrameGenerator(Sequence):
         self.vertical_flip = vertical_flip
         self.rotation_range = rotation_range
         self.brightness_range = brightness_range
-        self.__data_augmentation = self.vertical_flip or not self.rotation_range==[0.0,0.0] or not self.brightness_range==[0.0,0.0]
+        self._data_augmentation = data_augmentation
 
         self.list_IDs = np.arange(len(self.data))
         self.n_classes = n_classes
@@ -70,7 +76,8 @@ class FrameGenerator(Sequence):
     # Per Image
     def __transform(self,image):
         ext_img = cv2.resize(image,self.target_size)
-        ext_img = ext_img * self.rescale
+        #we cant rescale here
+        #ext_img = ext_img * self.rescale
         return ext_img
 
     # Per Sequence 
@@ -81,24 +88,76 @@ class FrameGenerator(Sequence):
 
         for i in range(len(frame_seq)):
             frame_seq[i] = cv2.flip(frame_seq[i],1)
+        print("Augmentation horizontal flip: Done!")
 
         return frame_seq
-
-    def __rotation(self,frame_seq:np.ndarray)->np.ndarray:
+    # We have to rescale before this
+    def __random_rotation(frame_seq:np.ndarray, rg, prob=1, row_axis=0, col_axis=1, channel_axis=2,
+                    fill_mode='nearest', cval=0., interpolation_order=1)->np.ndarray:
+        if np.random.rand() > prob:
+            return frame_seq
+        theta = np.random.uniform(-rg, rg)
+        for i in range(np.shape(frame_seq)[0]):
+            x = apply_affine_transform(frame_seq[i, :, :, :], theta=theta,row_axis=row_axis,col_axis=col_axis,channel_axis=channel_axis,
+                                        fill_mode=fill_mode, cval=cval,
+                                        order=interpolation_order)
+            frame_seq[i] = x
+        print("Augmentation rotation: Done!")
         
         return frame_seq
+
+    #we have to rescale after this not before
+    def __color_jitter(self,frames_seq:np.ndarray,prob=1)->np.ndarray:
+        s = np.random.rand()
+        if s > prob:
+            return frames_seq
+        #h_jitter = np.random.uniform(-10, 10)
+        s_jitter = np.random.uniform(-30, 30)  
+        v_jitter = np.random.uniform(-30, 30) 
+        for i in range(len(frames_seq)):
+            hsv = cv2.cvtColor(frames_seq[i], cv2.COLOR_RGB2HSV)
+            
+            #h = np.mod(hsv[..., 0] + h_jitter,180).astype(np.uint8)
+            s = hsv[..., 1] + s_jitter
+            v = hsv[..., 2] + v_jitter
+            s[s < 0] = 0
+            s[s > 254] = 254
+            v[v < 0] = 0
+            v[v > 254] = 254
+            
+            #hsv[..., 0] = h
+            #hsv[..., 1] = s
+            hsv[..., 2] = v
+            frames_seq[i] = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+        print("Augmentation color jitter: Done!")
+        return frames_seq
+
+
     
-    def __random_brightness(self,frame_seq:np.ndarray)->np.ndarray:
+    def __random_brightness(self,brightness_range,frame_seq:np.ndarray)->np.ndarray:
+        if len(brightness_range) != 2:
+            raise ValueError('`brightness range should be a tuple or list of two floats')
+        rand = np.random.uniform(brightness_range[0],brightness_range[1])
+        for i in range(np.shape(frame_seq)[0]):
+            aug_frame = apply_brightness_shift(frame_seq[i,:,:,:],rand)
+            frame_seq[i] = aug_frame
+        print(f"Augmentation random brightness: Done!{rand}")
+        
         return frame_seq
 
 
     def __augment(self,frame_seq):
-        if not self.__data_augmentation:
-            return frame_seq
-        
-        mapping = lambda a, b, c, x: a(b(c(x)))
-        return map(mapping,[self.__horizontal_flip,self.__rotation,self.__random_brightness])
+        if not self._data_augmentation:
+            frame_seq = frame_seq * self.rescale
 
+            return frame_seq
+        print("\nStarted Augmentation Process")
+        frame_seq = self.__random_brightness([0.6,1.4],frame_seq)
+        #frame_seq = self.__color_jitter(frame_seq,0.5)
+        frame_seq = frame_seq * self.rescale
+        frame_seq = self.__horizontal_flip(frame_seq)
+        #frame_seq = self.__random_rotation(frame_seq,10,0.7)
+        return frame_seq
 
     def __getOpticalFlow(self,frame_seq):
         """Calculate dense optical flow of input video
@@ -147,14 +206,24 @@ class FrameGenerator(Sequence):
             temp_data_list = []
             for img in seq_frames:
                 try:
+                    # Remove this 
+                    img = os.path.join('datasets',img)
                     image = cv2.imread(img)
                     ext_img = self.__transform(image)
                 except Exception as e: 
                     '''Code you'd want to run in case of an exception/err'''
+                    print(e)
+                    (height,width)=self.target_size
+                    ext_img = np.zeros((height,width,3), np.uint8)
                 temp_data_list.append(ext_img)
-            if self.append_flows:
-                temp_data_list = np.array(temp_data_list,dtype=np.float32)
+            
+            temp_data_list = np.array(temp_data_list,dtype=np.float32)
+            if self._data_augmentation:
+                print(f'Image directory {img}')
                 temp_data_list = self.__augment(temp_data_list)
+            else:
+                temp_data_list = temp_data_list*self.rescale
+            if self.append_flows:
                 temp_data_list = self.__getOpticalFlow(temp_data_list)
             X_data.append(temp_data_list) 
             y_data.append(y)
@@ -167,7 +236,7 @@ class FrameGenerator(Sequence):
         else:
             return X, np_utils.to_categorical(y,num_classes=self.n_classes)
 
-    def _file_generator(self,data_path,data_files,temporal_stride=4,temporal_length=10):
+    def _file_generator(self,data_path,data_files):
         #for every csv(directory) in list of csv files(directories)
         for f in data_files:
             tmp_df = pd.read_csv(os.path.join(data_path,f))
@@ -175,8 +244,8 @@ class FrameGenerator(Sequence):
             total_images = len(label_list)
 
             #Just in case we ask for temporal length bigger than all the images we have
-            if total_images >= temporal_length:
-                num_samples = int((total_images-temporal_length)/temporal_stride) + 1
+            if total_images >= self.temporal_length:
+                num_samples = int((total_images-self.temporal_length)/self.temporal_stride) + 1
                 #print('num of samples from vide seq--{}:  {}'.format(f,num_samples))
                 img_list = list(tmp_df['FileName'])
             else:
@@ -184,29 +253,25 @@ class FrameGenerator(Sequence):
                 continue
 
             start_frame = 0
-            #we have a rolling window of size==temporal_length and each iteration
-            #we add $temporal_strides # of elements and pop after the first 3 
+            #we have a rolling window of size==self.temporal_length and each iteration
+            #we add $self.temporal_strides # of elements and pop after the first 3 
             samples = deque()
             samp_count=0
             for img in img_list:
                 samples.append(img)
-                if len(samples)==temporal_length:
+                if len(samples)==self.temporal_length:
                     samples_c= copy.deepcopy(samples)
                     samp_count+=1
-                    for t in range(temporal_stride):
+                    for t in range(self.temporal_stride):
                         samples.popleft()
                     yield samples_c,label_list[0]
-
-
-
-
 
 
 
     def _load_samples(self,path='data_files',data_cat='train'):
         data_path = os.path.join(path,data_cat)
         data_files = os.listdir(data_path)
-        file_gen = self._file_generator(data_path,data_files,self.temporal_stride,self.temporal_length)
+        file_gen = self._file_generator(data_path,data_files)
         iterator = True
         data_list = []
         while iterator:
