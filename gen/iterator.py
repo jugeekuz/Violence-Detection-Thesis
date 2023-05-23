@@ -119,7 +119,7 @@ class BatchFromFilesMixin():
     """
 
     def set_processing_attrs(self,
-                             image_data_generator,
+                             frame_seq_generator,
                              target_size,
                              color_mode,
                              data_format,
@@ -127,7 +127,7 @@ class BatchFromFilesMixin():
                              keep_aspect_ratio,
                              prefix='datasets'):
         self.prefix = prefix
-        self.image_data_generator = image_data_generator
+        self.frame_seq_generator = frame_seq_generator
         self.target_size = tuple(target_size)
         self.keep_aspect_ratio = keep_aspect_ratio
         if color_mode != 'rgb':
@@ -159,11 +159,15 @@ class BatchFromFilesMixin():
                            prefix=self.prefix)
             # Pillow images should be closed after `load_img`,
             # but not PIL images.
-            if self.image_data_generator:
-                x = self.image_data_generator.random_augmentation(x)
+            if self.frame_seq_generator:
+                x = self.frame_seq_generator.random_augmentation(x)
                 if self.append_flows:
-                    x = self.image_data_generator.append_optical_flow(x)
-                x = self.image_data_generator.standardize(x)
+                    x = np.float32(x)
+                    x = self.frame_seq_generator.append_optical_flow(x)
+                elif self.append_diff:
+                    x = np.float32(x)
+                    x = self.frame_seq_generator.append_frame_differences(x)
+                x = self.frame_seq_generator.standardize(x)
             batch_x.append(x)
 
         batch_x = np.array(batch_x,dtype=self.dtype)

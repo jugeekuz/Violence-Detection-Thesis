@@ -122,35 +122,29 @@ class Preprocess:
     def _resize(self,image,target):
         return cv2.resize(image,target)
 
-    #Break Video to Frames and 
-    def _save_sequence(self, vid, path, newfps, video_i,seq_length=1,return_frames = False, target_size=(-1,-1)):
+    #Break Video to Frames 
+    #Save each sequence of N frames into a new folder
+    def _save_sequence(self, vid, path, newfps, video_i,seq_length=0,return_frames = False, target_size=(-1,-1)):
         video = cv2.VideoCapture(vid)
-        #video_dir = os.path.join(path,("Video_%d" % video_i))
-        #os.mkdir(video_dir)
-
+        
         #calculate at how many intervals you save a picture
-        new_frames = 0
         ((_,_),fps,total_frames) = self.get_video_specs(vid, False)
         if fps == 0:
             return
         duration = total_frames/fps
         new_frames = newfps * duration
-        step = (int) (total_frames/(new_frames)) 
+        if seq_length==0:
+            seq_length=new_frames
+        #step is the interval at which we save an image
+        step = (int) (total_frames/(new_frames))
         skip = 0
-        #if step = 1 start counting not from the start (fight happens later usually)
+
+        #in the case that total_frames div new_frames = 1 then we have to skip some frames in the beggining
         if step == 1 and new_frames<total_frames:
             skip = total_frames-new_frames
-        #Unfortunately we can't skip frames and that's not only OpenCV's problem
-        #Video codes encode based on the previous frame
-        i, j = 0, 0
+
+        i, j, total_count = 0, 0, 0
         success, image = video.read()
-        #name, _ = os.path.splitext(os.path.basename(vid))
-        '''
-        video_dir = os.path.join(path,("Video_{}}".format(video_i)))
-        if not os.path.exists(video_dir):
-            os.mkdir(video_dir)
-        '''
-        video_dir = os.path.join(path,"Video_{}".format(video_i))
         while success:
             j += 1
             if j > skip:
@@ -159,20 +153,21 @@ class Preprocess:
                 #save a frame every $step frames
                 if i % step == 1 or step == 1:                
                     #$count is the number of frame we saved (starts from 1)
-                    count = i if i//step==1 else(i//step + 1)              
-                    if count < 10 :
-                        filename = "frame_0{}.jpg".format(count)
-                    else:
-                        filename = "frame_{}.jpg".format(count)
-
-                    if (count) % seq_length == 1 or i==1:
-                        #The video index is all the videos before times the sequences per video
-                        # Plus the sequence we're on on this video (starting from 1)
-                        #video_i starts from 0
-                        video_index = (video_i)*(new_frames//seq_length) + (count//seq_length + 1)
+                    #count = i if i//step==1 else(i//step + 1)
+                    total_count += 1
+                    count = total_count%seq_length
+                    filename = "frame_{}.jpg".format(str(count).zfill(3))
+                    
+                    
+                    if total_count % seq_length == 1:
+                        
+                        #the first term is how many sequences per video times which video is this
+                        #second term is which # of sequence
+                        video_index = (video_i)*(new_frames//seq_length) + (total_count//seq_length + 1)
                         video_dir = os.path.join(path,("Video_%d" % video_index))
                         if not os.path.exists(video_dir):
                             os.mkdir(video_dir)
+                        #total_count = 0
                     fullpath = os.path.join(video_dir,filename)
 
                     
@@ -182,7 +177,7 @@ class Preprocess:
                     cv2.imwrite(fullpath, image)
 
                     #if we saved the frames we want dont process the other total_frames/step -1
-                    if count == new_frames:
+                    if total_count == new_frames:
                         video.release()
                         break        
             success, image = video.read()
@@ -225,17 +220,14 @@ class Preprocess:
                 if i % step == 1:                
                     #$count is which frame we saved (starts from 1)
                     count = i // step + 1                
-                    if count < 10 :
-                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_00{}.jpg".format(count)
-                    elif count< 100:
-                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_0{}.jpg".format(count)
-                    else:
-                        filename = os.path.basename(os.path.normpath(vid)) + "_frame_{}.jpg".format(count)
+                    filename = os.path.basename(os.path.normpath(vid)) + "_frame_00{}.jpg".format(str(count).zfill(3))
 
                     
                     fullpath = os.path.join(path,filename)                
                     if target_size != (-1,-1):
                         image = self._resize(image,target_size)
+                    if image is None: 
+                        break
                     cv2.imwrite(fullpath, image)
 
                     #if we saved the frames we want dont process the other total_frames/step -1
@@ -341,12 +333,9 @@ class Preprocess:
                     if not dirs:
                         framepath = root.replace(self.directory,path) 
                         total_videos += len(os.listdir(root))
-                        #process = multiprocessing.Process(target=self._save_frames,)
-                        #num_threads = len(os.listdir(root))
                         thread_list = []
                         for video_i, file in enumerate(os.listdir(root)):
                             vidpath = os.path.join(root,file)         
-                            #na sigourepsw oti to video i ksekinaei apo 1  
                             if num_threads != 1:
                                 if not toSequence:
                                     thread = threading.Thread(target=self._save_frames,args=(vidpath,framepath,fps,skip_sec,False,target_size,))
@@ -371,7 +360,7 @@ class Preprocess:
                                 pbar.update(1)
         
         except Exception as e:
-            print('File already exists')
+            print(e)
         finally:
             if createCSV:
                 self._createCSV(path,csv_path)    

@@ -9,11 +9,10 @@ class CSVIterator(BatchFromFilesMixin,Iterator):
     def __new__(cls,*args,**kwargs):
         try:
 
-            '''
             from tensorflow.keras.utils import Sequence as TFSequence
             if TFSequence not in cls.__bases__:
                 cls.__bases__ = cls.__bases__ + (TFSequence,)
-            '''
+            
         except ImportError:
             pass
         return super(CSVIterator, cls).__new__(cls)
@@ -30,6 +29,7 @@ class CSVIterator(BatchFromFilesMixin,Iterator):
                  shuffle=True,
                  seed=None,
                  append_flows=False,
+                 append_diff=False,
                  prefix=None,
                  color_mode='rgb',
                  data_format='channels_last',
@@ -42,11 +42,13 @@ class CSVIterator(BatchFromFilesMixin,Iterator):
                                                             color_mode,
                                                             data_format,
                                                             interpolation,
-                                                            keep_aspect_ratio)
+                                                            keep_aspect_ratio,
+                                                            prefix)
 
         self.directory = csv_directory
         self.classes = classes
         self.append_flows = append_flows
+        self.append_diff = append_diff
         if class_mode not in self.allowed_class_modes:
             raise ValueError('Invalid class_mode: {}, expected one of: {}'.format(class_mode,self.allowed_class_modes))
         self.class_mode = class_mode

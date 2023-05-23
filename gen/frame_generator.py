@@ -1,5 +1,7 @@
 import warnings
 import numpy as np
+from multiprocessing import Pool
+from functools import partial
 from .directory_iterator import CSVIterator
 import cv2
 from tensorflow.keras.preprocessing.image import apply_brightness_shift, apply_affine_transform
@@ -8,14 +10,17 @@ class FrameGenerator(object):
                 rescale = 1/255.,
                 color_jitter = None,
                 brightness_range = None,
-                rotation_range = 0,
+                pepper_ratio=100,
+                salt_ratio=100,
+                rotation_range = 0,                
                 data_format='channels_last',
                 horizontal_flip = False,
                 append_flows = False,
+                append_diff = False,
                 dtype='float32'):
 
         self.rescale = rescale
-        
+        self.dtype=dtype
         #Check that all values are of correct format
 
         if not isinstance(horizontal_flip,bool):
@@ -32,6 +37,12 @@ class FrameGenerator(object):
             )
         self.append_flows = append_flows
         
+        if not isinstance(append_diff,bool):
+            raise ValueError(
+                '`append_diff` should of type bool'
+                'Received: {}'.format(type(append_diff))
+            )
+        self.append_diff = append_diff
         if rotation_range < 0 or rotation_range > 90 or not isinstance(rotation_range,int):
             raise ValueError(
                 '`rotation_range` should be int between 0-90 degrees'
@@ -41,11 +52,25 @@ class FrameGenerator(object):
 
         if color_jitter is not None:
             if (not isinstance(color_jitter, (tuple, list)) or
-                    len(color_jitter) != 2):
+                    len(color_jitter) != 3):
                 raise ValueError(
-                    '`brightness_range should be tuple or list of two floats. '
+                    '`color_jitter should be tuple or list of 3 floats. '
                     'Received: %s' % (brightness_range,))
         self.color_jitter = color_jitter
+
+        if not isinstance(pepper_ratio,int):
+            raise ValueError(
+                '`pepper_ratio` should of type int'
+                'Received: {}'.format(type(pepper_ratio))
+            )
+        self.pepper_ratio = pepper_ratio
+
+        if not isinstance(salt_ratio,int):
+            raise ValueError(
+                '`salt_ratio` should of type int'
+                'Received: {}'.format(type(salt_ratio))
+            )
+        self.salt_ratio = salt_ratio
 
         if brightness_range is not None:
             if (not isinstance(brightness_range, (tuple, list)) or
@@ -87,6 +112,7 @@ class FrameGenerator(object):
                       interpolation='nearest',
                       prefix=None,
                       append_flows = False,
+                      append_diff=False,
                       random_seed = None,
                       keep_aspect_ratio=False):
 
@@ -102,6 +128,7 @@ class FrameGenerator(object):
                            class_mode=class_mode,
                            shuffle=shuffle,
                            append_flows=append_flows,
+                           append_diff=append_diff,
                            prefix=None,
                            seed=random_seed,
                            interpolation=interpolation)
@@ -148,6 +175,35 @@ class FrameGenerator(object):
         frames_flows = np.array(frames_flows, dtype=self.dtype)
         return frames_flows
 
+    def append_frame_differences(self,frame_seq):
+        """Calculate frame differences between frames and append        
+        """
+        # initialize the list of optical flows
+        gray_video = []
+        for i in range(len(frame_seq)):
+            img = cv2.cvtColor(frame_seq[i], cv2.COLOR_RGB2GRAY)
+            gray_video.append(np.reshape(img,(self.target_size[0],self.target_size[1],1)))
+
+        differences = []
+        for i in range(0,len(frame_seq)-1):
+            # calculate frame differences between each pair of frames
+            frame_diff = gray_video[i+1] - gray_video[i]
+            differences.append(frame_diff)
+            
+        # Padding the last frame as empty array
+        differences.append(np.zeros((self.target_size[0],self.target_size[1],1)))
+        #convert to np array
+        differences = np.array(differences)
+
+        #append frame differences as need be
+        frames_differences = []
+        for frame, diff in zip(frame_seq, differences):
+            frames_differences.append(np.append(frame,diff,axis=2))
+
+        #convert into np array
+        frames_differences = np.array(frames_differences, dtype=self.dtype)
+        return frames_differences
+
     def get_augmentation_paremeters(self, target_size, seed=None):
         
         if seed is not None:
@@ -177,12 +233,24 @@ class FrameGenerator(object):
         else:
             flip = False
         
+        if self.pepper_ratio:
+            pepper_ratio = self.pepper_ratio
+        else:
+            pepper_ratio = 100
+
+        if self.salt_ratio:
+            salt_ratio = self.salt_ratio
+        else:
+            salt_ratio = 100
+
 
 
         augmentation_parameters = {'color_params': color_params,
                                    'theta': theta,
                                    'brightness': brightness,
-                                   'flip': flip}
+                                   'flip': flip,
+                                   'salt_ratio':salt_ratio,
+                                   'pepper_ratio':pepper_ratio}
         return augmentation_parameters
 
 
@@ -193,6 +261,16 @@ class FrameGenerator(object):
         #apply transformations here
 
         #HORIZONTAL FLIP
+        '''
+        flip = augmentation_parameters.get('flip',False)
+        if flip:
+            with Pool() as pool:
+                args = [(image,1) for image in x]
+                results = pool.starmap_async(partial(cv2.flip), args)
+                x = np.array(results.get(),dtype=self.dtype)
+                #print(f'Successfully pooled type {type(x)} shape {x.shape}')
+        '''        
+        
         flip = augmentation_parameters.get('flip',False)
         if flip :
             for i in range(len(x)):
@@ -216,15 +294,27 @@ class FrameGenerator(object):
             cval=0.
             interpolation_order=1
             for i in range(np.shape(x)[0]):
-                x[i] = apply_affine_transform(x[i, :, :, :], theta=theta,row_axis=self.row_axis,col_axis=self.col_axis,channel_axis=self.channel_axis,
+                x[i] = apply_affine_transform(x[i, :, :, :], theta=theta,row_axis=self.row_axis-1,col_axis=self.col_axis-1,channel_axis=self.channel_axis-1,
                                         fill_mode=fill_mode, cval=cval,
                                         order=interpolation_order)
 
-                
-        #APPEND FLOWS 
-        if augmentation_parameters.get('flows',False):
-            #do stuff here
-            dummy = None
+        #PEPPER - SETS RANDOM PIXELS TO BLACK
+        pepper_ratio = augmentation_parameters.get('pepper_ratio',100)
+        if pepper_ratio != 100:
+            for i in range(np.shape(x)[0]):
+                img_shape = x[i].shape
+                noise = np.random.randint(self.pepper_ratio, size=img_shape)
+                x[i] = np.where(noise == 0, 0, x[i])
+
+
+        #SALT - SETS RANDOM PIXELS TO WHITE
+        salt_ratio = augmentation_parameters.get('salt_ratio',100)
+        if salt_ratio != 100:
+            for i in range(np.shape(x)[0]):
+                img_shape = x[i].shape
+                noise = np.random.randint(self.salt_ratio, size=img_shape)
+                x[i] = np.where(noise == 0, 255, x[i])                
+        
 
 
 
