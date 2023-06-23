@@ -9,8 +9,8 @@ and another using a Two Stream Inflated Conv3D network using frame differences.
 
 -"utilities.py" contains auxiliary functions, mainly aiding the preprocessing of videos for use in our networks.
 
--"violence_detection_CNN_002.ipynb" is the transfer learning approach
+-"violence_detection_CNN_002.ipynb" is the transfer learning approach using InceptionNetV3
 
--"violence_detection_Two_Stream_004.ipynb" is the Two Stream Inflated Conv3D network using frame differences.
+-"violence_detection_Two_Stream_004.ipynb" is the Two Stream Inflated Conv3D network using frame differences inspired by Flow Gated Network.
 
 -"gen/" contains a python library inspired by ImageDataGenerator that serves the purpose of a sequence-of-images generator for use in our networks, including Data Augmentation techniques. 
